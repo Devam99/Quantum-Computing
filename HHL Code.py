@@ -254,3 +254,48 @@ def run_hhl(A, b, n_clock=4):
     print("=" * 60)
 
     return x_classical, x_hhl, fidelity, qc
+
+
+# ============================================================
+# Example usage
+# ============================================================
+
+if __name__ == "__main__":
+
+    # Example 1: 2x2 system
+    print("\n>>> Example 1: 2x2 system\n")
+    A1 = np.array([[2, 1],
+                    [1, 3]], dtype=float)
+    b1 = np.array([1, 0], dtype=float)
+    run_hhl(A1, b1, n_clock=4)
+
+    # Example 2: 4x4 system
+    print("\n>>> Example 2: 4x4 system\n")
+    A2 = np.array([[4, 1, 0, 0],
+                    [1, 3, 1, 0],
+                    [0, 1, 2, 1],
+                    [0, 0, 1, 5]], dtype=float)
+    b2 = np.array([1, 0, 0, 1], dtype=float)
+    run_hhl(A2, b2, n_clock=6)
+
+    # Example 3: User input
+    print("\n>>> Example 3: Custom input\n")
+    print("Enter a Hermitian matrix A and vector b.")
+    print("(Dimensions must be a power of 2)\n")
+
+    try:
+        n = int(input("Enter dimension N: "))
+        print(f"Enter {n}x{n} matrix A row by row "
+              f"(space-separated values):")
+        A_custom = np.zeros((n, n), dtype=complex)
+        for i in range(n):
+            row = input(f"  Row {i}: ").split()
+            A_custom[i] = [complex(x) for x in row]
+
+        print(f"Enter vector b ({n} space-separated values):")
+        b_custom = np.array([complex(x) for x in input("  b: ").split()])
+
+        run_hhl(A_custom, b_custom, n_clock=6)
+
+    except (ValueError, KeyboardInterrupt) as e:
+        print(f"\nSkipping custom input: {e}")
