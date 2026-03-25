@@ -1,4 +1,5 @@
 import numpy as np
+from nltk.corpus import qc
 from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister
 from qiskit_aer import AerSimulator
 from qiskit.quantum_info import Statevector
@@ -67,7 +68,7 @@ def build_qpe(A, t0, n_clock, n_system):
     #Step 3: Inverse QFT on clock register
     qc.append(build_inverse_qft(n_clock), range(n_clock))
 
-    retrun qc.to_gate()
+    return qc.to_gate()
 
 def build_inverse_qft(n):
     """Build the inverse QFT on n qubits."""
