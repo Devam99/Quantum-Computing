@@ -196,34 +196,42 @@ def extract_solution(qc, n_clock, n_system):
     # Remove measurement for statevector simulation
     qc_copy = qc.remove_final_measurements(inplace=False)
 
+    # Decompose custom gates into basic gates that Aer understands
+    qc_decomposed = qc_copy.decompose()
+    while any(
+        inst.operation.name not in [
+            'u', 'u1', 'u2', 'u3', 'cx', 'cy', 'cz', 'h', 'x', 'y', 'z',
+            's', 'sdg', 't', 'tdg', 'rx', 'ry', 'rz', 'swap', 'ccx',
+            'unitary', 'initialize', 'save_statevector', 'id', 'p', 'cp',
+            'cry', 'crx', 'crz', 'barrier'
+        ]
+        for inst in qc_decomposed.data
+    ):
+        qc_decomposed = qc_decomposed.decompose()
+
     simulator = AerSimulator(method='statevector')
-    qc_copy.save_statevector()
-    result = simulator.run(qc_copy).result()
+    qc_decomposed.save_statevector()
+    result = simulator.run(qc_decomposed).result()
     statevector = result.get_statevector()
 
     n_total = n_clock + n_system + 1
     amplitudes = np.array(statevector)
 
     # Extract amplitudes where ancilla qubit = |1>
-    # The ancilla is the last qubit in our register ordering
     N_system = 2**n_system
     solution_amplitudes = np.zeros(N_system, dtype=complex)
 
     for idx in range(len(amplitudes)):
-        # Convert index to binary string
         binary = format(idx, f'0{n_total}b')
 
-        # Check if ancilla (last qubit) is 1 and clock register is all 0
         ancilla_bit = binary[-1]
         clock_bits = binary[:n_clock]
 
         if ancilla_bit == '1' and all(c == '0' for c in clock_bits):
-            # Extract system register bits
             system_bits = binary[n_clock:n_clock + n_system]
             system_idx = int(system_bits, 2)
             solution_amplitudes[system_idx] = amplitudes[idx]
 
-    # Normalise
     norm = np.linalg.norm(solution_amplitudes)
     if norm < 1e-12:
         print("Warning: post-selection probability is near zero.")
