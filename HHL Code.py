@@ -1,7 +1,7 @@
 import numpy as np
 from scipy.linalg import expm
 from qiskit import QuantumCircuit, ClassicalRegister, transpile
-from qiskit.circuit.library import UnitaryGate, RYGate, QFTGate
+from qiskit.circuit.library import UnitaryGate, RYGate, QFTGate, HamiltonianGate
 from qiskit.quantum_info import Statevector
 from qiskit_aer import AerSimulator
 
@@ -59,43 +59,57 @@ def choose_parameters(eigenvalues, n_clock):
     return t0, C
 
 
-def build_hhl_circuit(A, b, n_clock, t0, C, eigenvalues, n_system):
-    """Build the full HHL circuit for arbitrary A and b."""
+def build_hhl_circuit(A, b, n_clock, t0, C, eigenvalues, n_system,
+                      use_trotter=False, trotter_steps=4):
+    """Build the full HHL circuit for arbitrary A and b.
+
+    Parameters:
+        use_trotter: if True, use Trotter decomposition for Hamiltonian
+                     simulation instead of dense expm. Recommended for
+                     n_system >= 3.
+        trotter_steps: number of Trotter steps (higher = more accurate
+                       but deeper circuit).
+    """
     N = 2 ** n_system
     n_total = n_clock + n_system + 1
 
-    # Qubit layout:
-    # [0, ..., n_system-1]          -> system register
-    # [n_system, ..., n_system+n_clock-1] -> clock register
-    # [n_system+n_clock]            -> ancilla
     sys_q = list(range(n_system))
     clk_q = list(range(n_system, n_system + n_clock))
     anc_q = n_system + n_clock
 
     qc = QuantumCircuit(n_total, name='HHL')
 
-    # ---- Step 1: Prepare |b> in the system register ----
+    # Step 1: Prepare |b>
     b_norm = b / np.linalg.norm(b)
     qc.initialize(b_norm, sys_q)
 
-    # ---- Step 2: QPE ----
-    # Hadamard on all clock qubits
+    # Step 2: QPE
     qc.h(clk_q)
 
-    # Controlled-U^{2^j} for each clock qubit
     for j, c in enumerate(clk_q):
-        U_power = expm(1j * A * t0 * (2 ** j))
-        gate = UnitaryGate(U_power, label=f'U^{2 ** j}')
-        qc.append(gate.control(1), [c] + sys_q)
+        if use_trotter:
+            # Build Trotter circuit for e^{iA * t0 * 2^j}
+            trotter_qc = build_trotter_circuit(
+                A, t0 * (2 ** j), n_system, trotter_steps
+            )
+            controlled_gate = trotter_qc.to_gate().control(1)
+        else:
+            U_power = expm(1j * A * t0 * (2 ** j))
+            controlled_gate = UnitaryGate(
+                U_power, label=f'U^{2 ** j}'
+            ).control(1)
 
-    # Inverse QFT on clock register
+        qc.append(controlled_gate, [c] + sys_q)
+
     iqft = QFTGate(n_clock).inverse()
     qc.append(iqft, clk_q)
 
     qc.barrier(label='QPE done')
 
-    # ---- Step 3: Controlled rotations ----
-    eigenvalue_clock_map = build_eigenvalue_clock_map(eigenvalues, t0, n_clock)
+    # Step 3: Controlled rotations
+    eigenvalue_clock_map = build_eigenvalue_clock_map(
+        eigenvalues, t0, n_clock
+    )
 
     for lam, ctrl_state in eigenvalue_clock_map.items():
         ratio = C / lam
@@ -107,14 +121,23 @@ def build_hhl_circuit(A, b, n_clock, t0, C, eigenvalues, n_system):
 
     qc.barrier(label='Rotations done')
 
-    # ---- Step 4: Inverse QPE ----
+    # Step 4: Inverse QPE
     qft = QFTGate(n_clock)
     qc.append(qft, clk_q)
 
     for j in reversed(range(n_clock)):
-        U_dag = expm(-1j * A * t0 * (2 ** j))
-        gate = UnitaryGate(U_dag, label=f'U†^{2 ** j}')
-        qc.append(gate.control(1), [clk_q[j]] + sys_q)
+        if use_trotter:
+            trotter_qc = build_trotter_circuit(
+                A, -t0 * (2 ** j), n_system, trotter_steps
+            )
+            controlled_gate = trotter_qc.to_gate().control(1)
+        else:
+            U_dag = expm(-1j * A * t0 * (2 ** j))
+            controlled_gate = UnitaryGate(
+                U_dag, label=f'U†^{2 ** j}'
+            ).control(1)
+
+        qc.append(controlled_gate, [clk_q[j]] + sys_q)
 
     qc.h(clk_q)
 
@@ -300,13 +323,41 @@ def align_phase(x_hhl, x_classical):
 
     return np.real(x_hhl * phase)
 
-def run_hhl(A, b, n_clock=None):
+
+def decompose_hermitian(A):
+    """Decompose a Hermitian matrix A into a sum of tensor products
+    of Pauli matrices. Returns a list of (coefficient, pauli_string) pairs."""
+    from qiskit.quantum_info import SparsePauliOp
+    n = int(np.log2(A.shape[0]))
+    op = SparsePauliOp.from_operator(A)
+    return op
+
+
+def build_trotter_circuit(A, t, n_system, trotter_steps=1):
+    """Build a first-order Trotter approximation to e^{iAt}.
+    Decomposes A into Pauli terms and exponentiates each separately."""
+    from qiskit.circuit.library import PauliEvolutionGate
+    from qiskit.synthesis import LieTrotter
+    from qiskit.quantum_info import SparsePauliOp
+
+    op = SparsePauliOp.from_operator(A)
+
+    evolution_gate = PauliEvolutionGate(
+        op,
+        time=t,
+        synthesis=LieTrotter(reps=trotter_steps)
+    )
+
+    qc = QuantumCircuit(n_system)
+    qc.append(evolution_gate, range(n_system))
+
+    return qc
+
+def run_hhl(A, b, n_clock=None, use_trotter=False, trotter_steps=4):
     """Main function to run HHL and compare with classical solution."""
 
-    # Validate inputs
     validate_inputs(A, b)
 
-    # Get system info
     info = get_system_info(A, b)
     N = info['N']
     n_system = info['n_system']
@@ -314,16 +365,15 @@ def run_hhl(A, b, n_clock=None):
     kappa = info['kappa']
     x_classical_norm = info['x_classical_norm']
 
-    # Choose n_clock automatically if not specified
     if n_clock is None:
-        # Use enough clock qubits to represent eigenvalues
-        # At minimum 2, scale up with system size
         n_clock = max(2, n_system + 2)
 
-    # Choose HHL parameters
+    # Auto-enable Trotter for larger systems
+    if n_system >= 3 and not use_trotter:
+        print(f"  Note: consider use_trotter=True for {N}x{N} systems")
+
     t0, C = choose_parameters(eigenvalues, n_clock)
 
-    # Print system info
     print("=" * 60)
     print("HHL Algorithm Implementation")
     print("=" * 60)
@@ -331,13 +381,15 @@ def run_hhl(A, b, n_clock=None):
     print(f"  System qubits:    {n_system}")
     print(f"  Clock qubits:     {n_clock}")
     print(f"  Total qubits:     {n_system + n_clock + 1}")
+    print(f"  Method:           {'Trotter' if use_trotter else 'Dense expm'}")
+    if use_trotter:
+        print(f"  Trotter steps:    {trotter_steps}")
     print(f"\n  Eigenvalues:      {eigenvalues}")
     print(f"  Condition number: {kappa:.4f}")
     print(f"  t0:               {t0:.6f}")
     print(f"  C:                {C:.6f}")
     print(f"\n  Classical solution (normalised): {x_classical_norm}")
 
-    # Check eigenvalue-to-clock mapping
     eigenvalue_clock_map = build_eigenvalue_clock_map(eigenvalues, t0, n_clock)
     print(f"\n  Eigenvalue -> Clock register mapping:")
     for lam, ctrl_state in eigenvalue_clock_map.items():
@@ -345,22 +397,20 @@ def run_hhl(A, b, n_clock=None):
         print(f"    λ = {lam:.4f} -> k = {k:.2f} -> "
               f"rounded = {int(np.round(k))} -> ctrl = {ctrl_state}")
 
-    # Build circuit
     print(f"\n  Building HHL circuit...")
     qc, sys_q, clk_q, anc_q = build_hhl_circuit(
-        A, b, n_clock, t0, C, eigenvalues, n_system
+        A, b, n_clock, t0, C, eigenvalues, n_system,
+        use_trotter=use_trotter, trotter_steps=trotter_steps
     )
     print(f"  Circuit depth: {qc.depth()}")
     print(f"  Gate count:    {qc.size()}")
 
-    # Statevector simulation
     print(f"\n  Running statevector simulation...")
     x_hhl_norm, p_success = extract_solution_statevector(
         qc, sys_q, clk_q, anc_q, n_system, n_clock
     )
     print(f"  Post-selection probability: {p_success:.6f}")
 
-    # Shot-based simulation
     shots = 100000
     print(f"\n  Running shot-based simulation ({shots} shots)...")
     probs_shots, post_counts, p_success_shots = extract_solution_shots(
@@ -369,10 +419,8 @@ def run_hhl(A, b, n_clock=None):
     print(f"  Post-selection rate: {p_success_shots:.4f}")
     print(f"  Post-selected counts: {post_counts}")
 
-    # Compare
     compare_solutions(x_classical_norm, x_hhl_norm, probs_shots)
 
-    # Print circuit
     print(f"\n{'=' * 60}")
     print("CIRCUIT")
     print("=" * 60)
