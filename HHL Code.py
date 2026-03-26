@@ -1,325 +1,450 @@
 import numpy as np
-from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister
-from qiskit_aer import AerSimulator
-from qiskit.quantum_info import Statevector
 from scipy.linalg import expm
-
+from qiskit import QuantumCircuit, ClassicalRegister, transpile
+from qiskit.circuit.library import UnitaryGate, RYGate, QFTGate
+from qiskit.quantum_info import Statevector
+from qiskit_aer import AerSimulator
 
 def validate_inputs(A, b):
-    """Check that A is Hermitian, square, dimensions are power of 2,
-    and b has matching dimension."""
+    """Check that A is Hermitian, square, invertible, dimensions are
+    power of 2, and b has matching dimension."""
     N = A.shape[0]
     if A.shape[0] != A.shape[1]:
         raise ValueError("A must be square.")
     if not np.allclose(A, A.conj().T):
         raise ValueError("A must be Hermitian.")
-    if np.log2(N) != int(np.log2(N)):
+    if N == 0 or (N & (N - 1)) != 0:
         raise ValueError(f"Dimension N={N} must be a power of 2.")
     if b.shape[0] != N:
         raise ValueError(f"b has dimension {b.shape[0]}, expected {N}.")
-    if np.linalg.det(A) == 0:
+    if np.abs(np.linalg.det(A)) < 1e-10:
         raise ValueError("A must be invertible.")
 
 
-def normalise(v):
-    """Return the normalised version of a vector."""
-    norm = np.linalg.norm(v)
-    if norm < 1e-12:
-        raise ValueError("Cannot normalise the zero vector.")
-    return v / norm
-
-
-def classical_solve(A, b):
-    """Solve Ax = b classically and return the normalised solution."""
-    x = np.linalg.solve(A, b)
-    return normalise(x)
-
-
-def get_eigenvalues(A):
-    """Return eigenvalues and eigenvectors of A."""
-    eigenvalues, eigenvectors = np.linalg.eigh(A)
-    return eigenvalues, eigenvectors
-
-
-def choose_t0(eigenvalues, n_clock):
-    """Choose the time parameter t0 so that eigenvalues map to phases
-    representable in n_clock bits."""
-    lambda_max = np.max(np.abs(eigenvalues))
-    t0 = 2 * np.pi / (2**n_clock)
-    # Scale so that lambda_max * t0 < 2*pi
-    t0 = 2 * np.pi / (lambda_max * 1.1)  # small buffer
-    return t0
-
-
-def build_hamiltonian_simulation(A, t, n_system):
-    """Build the unitary e^{iAt} as a gate."""
-    U = expm(1j * A * t)
-    qc = QuantumCircuit(n_system, name=f'e^(iAt)')
-    qc.unitary(U, range(n_system))
-    return qc.to_gate()
-
-
-def build_controlled_hamiltonian(A, t, power, n_system):
-    """Build controlled-U^{2^power} = controlled-e^{iA * 2^power * t}."""
-    U = expm(1j * A * t * (2**power))
-    qc = QuantumCircuit(n_system, name=f'c-e^(iA*2^{power}*t)')
-    qc.unitary(U, range(n_system))
-    return qc.to_gate().control(1)
-
-
-def build_qpe(A, t0, n_clock, n_system):
-    """Build the quantum phase estimation circuit."""
-    qc = QuantumCircuit(n_clock + n_system, name='QPE')
-
-    # Step 1: Hadamard on all clock qubits
-    for i in range(n_clock):
-        qc.h(i)
-
-    # Step 2: Controlled-U^{2^k} operations
-    for k in range(n_clock):
-        cu = build_controlled_hamiltonian(A, t0, k, n_system)
-        control_qubit = k
-        target_qubits = list(range(n_clock, n_clock + n_system))
-        qc.append(cu, [control_qubit] + target_qubits)
-
-    # Step 3: Inverse QFT on clock register
-    qc.append(build_inverse_qft(n_clock), range(n_clock))
-
-    return qc.to_gate()
-
-
-def build_inverse_qft(n):
-    """Build the inverse QFT on n qubits."""
-    qc = QuantumCircuit(n, name='QFT†')
-
-    for i in range(n // 2):
-        qc.swap(i, n - i - 1)
-
-    for target in range(n):
-        for control in range(target):
-            angle = -np.pi / (2**(target - control))
-            qc.cp(angle, control, target)
-        qc.h(target)
-
-    return qc.to_gate()
-
-
-def build_qft(n):
-    """Build the QFT on n qubits (used for inverse QPE)."""
-    qc = QuantumCircuit(n, name='QFT')
-
-    for target in range(n - 1, -1, -1):
-        qc.h(target)
-        for control in range(target - 1, -1, -1):
-            angle = np.pi / (2**(target - control))
-            qc.cp(angle, control, target)
-
-    for i in range(n // 2):
-        qc.swap(i, n - i - 1)
-
-    return qc.to_gate()
-
-
-def build_controlled_rotation(n_clock):
-    """Build the controlled rotation that maps
-    |lambda_j>|0> -> |lambda_j>(C/lambda_j|1> + sqrt(1-C^2/lambda_j^2)|0>).
-    Implemented as controlled-Ry rotations based on clock register bits."""
-    qc = QuantumCircuit(n_clock + 1, name='C-Rot')
-
-    for k in range(n_clock):
-        # The k-th clock qubit represents the value 2^{-(k+1)} in the
-        # binary fraction. The rotation angle is chosen so that
-        # sin(theta/2) = C / lambda, approximated bit by bit.
-        theta = 2 * np.arcsin(1 / (2**(n_clock - k)))
-        qc.cry(theta, k, n_clock)
-
-    return qc.to_gate()
-
-
-def build_inverse_qpe(A, t0, n_clock, n_system):
-    """Build the inverse QPE circuit."""
-    qc = QuantumCircuit(n_clock + n_system, name='QPE†')
-
-    # Inverse of QPE: QFT, then inverse controlled unitaries, then Hadamards
-    qc.append(build_qft(n_clock), range(n_clock))
-
-    for k in range(n_clock - 1, -1, -1):
-        cu = build_controlled_hamiltonian(A, -t0, k, n_system)
-        control_qubit = k
-        target_qubits = list(range(n_clock, n_clock + n_system))
-        qc.append(cu, [control_qubit] + target_qubits)
-
-    for i in range(n_clock):
-        qc.h(i)
-
-    return qc.to_gate()
-
-
-def build_hhl_circuit(A, b, n_clock):
-    """Build the full HHL circuit for a given A and b."""
+def get_system_info(A, b):
+    """Compute eigenvalues, classical solution, and HHL parameters."""
     N = A.shape[0]
     n_system = int(np.log2(N))
-    t0 = choose_t0(get_eigenvalues(A)[0], n_clock)
 
-    # Registers
-    clock = QuantumRegister(n_clock, name='clock')
-    system = QuantumRegister(n_system, name='system')
-    ancilla = QuantumRegister(1, name='ancilla')
-    c_ancilla = ClassicalRegister(1, name='c_ancilla')
+    eigenvalues, eigenvectors = np.linalg.eigh(A)
+    kappa = np.max(np.abs(eigenvalues)) / np.min(np.abs(eigenvalues))
 
-    qc = QuantumCircuit(clock, system, ancilla, c_ancilla)
+    x_classical = np.linalg.solve(A, b)
+    x_classical_norm = x_classical / np.linalg.norm(x_classical)
 
-    # Prepare |b> in the system register
-    b_normalised = normalise(b)
-    qc.initialize(b_normalised, system[:])
-
-    # Step 1: QPE
-    qpe_qubits = list(range(n_clock)) + list(range(n_clock, n_clock + n_system))
-    qc.append(build_qpe(A, t0, n_clock, n_system), qpe_qubits)
-
-    # Step 2: Controlled rotation
-    rot_qubits = list(range(n_clock)) + [n_clock + n_system]
-    qc.append(build_controlled_rotation(n_clock), rot_qubits)
-
-    # Step 3: Inverse QPE
-    qc.append(build_inverse_qpe(A, t0, n_clock, n_system), qpe_qubits)
-
-    # Step 4: Measure ancilla
-    qc.measure(ancilla, c_ancilla)
-
-    return qc, t0
+    return {
+        'N': N,
+        'n_system': n_system,
+        'eigenvalues': eigenvalues,
+        'eigenvectors': eigenvectors,
+        'kappa': kappa,
+        'x_classical': x_classical,
+        'x_classical_norm': x_classical_norm,
+    }
 
 
-def extract_solution(qc, n_clock, n_system):
-    """Run the circuit on the statevector simulator and extract the
-    solution state conditioned on ancilla = |1>."""
-    from qiskit import transpile
+def choose_parameters(eigenvalues, n_clock):
+    """Choose t0 and C for the HHL circuit.
+    t0 is chosen so that eigenvalue phases fit in the clock register.
+    C is set to lambda_min to maximise success probability."""
+    lambda_min = np.min(np.abs(eigenvalues))
+    lambda_max = np.max(np.abs(eigenvalues))
 
-    # Remove measurement for statevector simulation
-    qc_copy = qc.remove_final_measurements(inplace=False)
-    qc_copy.save_statevector()
+    # t0 chosen so that lambda_max * t0 * 2^n_clock / (2*pi) < 2^n_clock
+    # i.e. all eigenvalues map to phases in (0, 1)
+    t0 = 2 * np.pi / (2**n_clock)
 
-    # Transpile to basic gates instead of manual decomposition
-    simulator = AerSimulator(method='statevector')
-    qc_transpiled = transpile(qc_copy, simulator)
+    C = lambda_min
 
-    result = simulator.run(qc_transpiled).result()
-    statevector = result.get_statevector()
+    return t0, C
 
+
+def build_hhl_circuit(A, b, n_clock, t0, C, eigenvalues, n_system):
+    """Build the full HHL circuit for arbitrary A and b."""
+    N = 2 ** n_system
     n_total = n_clock + n_system + 1
-    amplitudes = np.array(statevector)
 
-    # Extract amplitudes where ancilla qubit = |1>
-    N_system = 2**n_system
-    solution_amplitudes = np.zeros(N_system, dtype=complex)
+    # Qubit layout:
+    # [0, ..., n_system-1]          -> system register
+    # [n_system, ..., n_system+n_clock-1] -> clock register
+    # [n_system+n_clock]            -> ancilla
+    sys_q = list(range(n_system))
+    clk_q = list(range(n_system, n_system + n_clock))
+    anc_q = n_system + n_clock
 
-    for idx in range(len(amplitudes)):
-        binary = format(idx, f'0{n_total}b')
+    qc = QuantumCircuit(n_total, name='HHL')
 
-        ancilla_bit = binary[-1]
-        clock_bits = binary[:n_clock]
+    # ---- Step 1: Prepare |b> in the system register ----
+    b_norm = b / np.linalg.norm(b)
+    qc.initialize(b_norm, sys_q)
 
-        if ancilla_bit == '1' and all(c == '0' for c in clock_bits):
-            system_bits = binary[n_clock:n_clock + n_system]
-            system_idx = int(system_bits, 2)
-            solution_amplitudes[system_idx] = amplitudes[idx]
+    # ---- Step 2: QPE ----
+    # Hadamard on all clock qubits
+    qc.h(clk_q)
 
-    norm = np.linalg.norm(solution_amplitudes)
-    if norm < 1e-12:
-        print("Warning: post-selection probability is near zero.")
-        return solution_amplitudes
+    # Controlled-U^{2^j} for each clock qubit
+    for j, c in enumerate(clk_q):
+        U_power = expm(1j * A * t0 * (2 ** j))
+        gate = UnitaryGate(U_power, label=f'U^{2 ** j}')
+        qc.append(gate.control(1), [c] + sys_q)
 
-    return solution_amplitudes / norm
+    # Inverse QFT on clock register
+    iqft = QFTGate(n_clock).inverse()
+    qc.append(iqft, clk_q)
+
+    qc.barrier(label='QPE done')
+
+    # ---- Step 3: Controlled rotations ----
+    eigenvalue_clock_map = build_eigenvalue_clock_map(eigenvalues, t0, n_clock)
+
+    for lam, ctrl_state in eigenvalue_clock_map.items():
+        ratio = C / lam
+        if np.abs(ratio) > 1:
+            ratio = np.sign(ratio)
+        theta = 2 * np.arcsin(ratio)
+        cry_gate = RYGate(theta).control(n_clock, ctrl_state=ctrl_state)
+        qc.append(cry_gate, clk_q + [anc_q])
+
+    qc.barrier(label='Rotations done')
+
+    # ---- Step 4: Inverse QPE ----
+    qft = QFTGate(n_clock)
+    qc.append(qft, clk_q)
+
+    for j in reversed(range(n_clock)):
+        U_dag = expm(-1j * A * t0 * (2 ** j))
+        gate = UnitaryGate(U_dag, label=f'U†^{2 ** j}')
+        qc.append(gate.control(1), [clk_q[j]] + sys_q)
+
+    qc.h(clk_q)
+
+    qc.barrier(label='Inverse QPE done')
+
+    return qc, sys_q, clk_q, anc_q
 
 
-def run_hhl(A, b, n_clock=4):
+def build_eigenvalue_clock_map(eigenvalues, t0, n_clock):
+    """Map each eigenvalue to its binary control string for the clock register.
+
+    After QPE, eigenvalue lambda_j is stored as integer
+    k_j = lambda_j * t0 * 2^n_clock / (2*pi) in the clock register.
+
+    The control string must match Qiskit's qubit ordering for the
+    multi-controlled gate."""
+    clock_map = {}
+
+    for lam in eigenvalues:
+        k = lam * t0 * (2 ** n_clock) / (2 * np.pi)
+        k_rounded = int(np.round(k)) % (2 ** n_clock)
+
+        if k_rounded == 0:
+            continue
+
+        # Binary string with n_clock bits
+        # Qiskit ctrl_state expects LSB first ordering
+        ctrl_state = format(k_rounded, f'0{n_clock}b')
+
+        if lam not in clock_map:
+            clock_map[lam] = ctrl_state
+
+    return clock_map
+
+def extract_solution_statevector(qc, sys_q, clk_q, anc_q, n_system, n_clock):
+    """Extract the HHL solution using statevector simulation.
+    Post-selects on ancilla=|1> and clock=|00...0>."""
+    sv = Statevector.from_instruction(qc)
+    state_dict = sv.to_dict()
+
+    N = 2**n_system
+    n_total = n_clock + n_system + 1
+    clock_zeros = '0' * n_clock
+
+    solution_amplitudes = np.zeros(N, dtype=complex)
+
+    for label, amp in state_dict.items():
+        if abs(amp) < 1e-12:
+            continue
+
+        anc_bit = label[0]
+        clk_bits = label[1:1 + n_clock]
+        sys_bits = label[1 + n_clock:]
+
+        if anc_bit == '1' and clk_bits == clock_zeros:
+            sys_idx = int(sys_bits[::-1], 2)
+            solution_amplitudes[sys_idx] = amp
+
+    p_success = np.linalg.norm(solution_amplitudes)**2
+
+    if p_success < 1e-12:
+        print("WARNING: post-selection probability is ~0")
+        return solution_amplitudes, p_success
+
+    x_hhl_norm = solution_amplitudes / np.linalg.norm(solution_amplitudes)
+
+    return x_hhl_norm, p_success
+
+
+def extract_solution_shots(qc, sys_q, clk_q, anc_q, n_system, n_clock,
+                           shots=100000):
+    """Extract the HHL solution using shot-based simulation.
+    Post-selects on ancilla=1 and clock=00...0."""
+    # Add classical register and measurements
+    qc_meas = qc.copy()
+    n_total = n_clock + n_system + 1
+    cr = ClassicalRegister(n_total, 'meas')
+    qc_meas.add_register(cr)
+
+    # Measure all qubits
+    for i in range(n_total):
+        qc_meas.measure(i, i)
+
+    backend = AerSimulator()
+    qc_transpiled = transpile(qc_meas, backend, optimization_level=0)
+    job = backend.run(qc_transpiled, shots=shots)
+    counts = job.result().get_counts()
+
+    # Post-select: ancilla=1, clock=00...0
+    N = 2**n_system
+    post_selected = {}
+    clock_zeros = '0' * n_clock
+
+    for bitstr, count in counts.items():
+        # Qiskit bitstring: highest index qubit on the left
+        anc_bit = bitstr[0]
+        clk_bits = bitstr[1:1 + n_clock]
+        sys_bits = bitstr[1 + n_clock:]
+
+        if anc_bit == '1' and clk_bits == clock_zeros:
+            post_selected[sys_bits] = post_selected.get(sys_bits, 0) + count
+
+    total_post = sum(post_selected.values())
+    p_success = total_post / shots
+
+    if total_post == 0:
+        print("WARNING: no post-selected counts")
+        return np.zeros(N), {}, p_success
+
+    # Build probability vector
+    probs = np.zeros(N)
+    for sys_bits, count in post_selected.items():
+        sys_idx = int(sys_bits[::-1], 2)
+        probs[sys_idx] = count / total_post
+
+    return probs, post_selected, p_success
+
+
+def compare_solutions(x_classical_norm, x_hhl_norm, probs_shots=None):
+    """Compare HHL solution with classical solution."""
+    N = len(x_classical_norm)
+
+    print("\n" + "=" * 60)
+    print("COMPARISON: Statevector Simulation")
+    print("=" * 60)
+
+    # Handle global phase: align signs by multiplying by phase factor
+    x_hhl_real = align_phase(x_hhl_norm, x_classical_norm)
+
+    print(f"\n  Classical x (normalised):  {x_classical_norm}")
+    print(f"  HHL x (normalised):        {x_hhl_real}")
+
+    print(f"\n  Element-wise comparison:")
+    for i in range(N):
+        print(f"    x[{i}]: classical = {x_classical_norm[i]:+.6f}, "
+              f"HHL = {x_hhl_real[i]:+.6f}")
+
+    fidelity = np.abs(np.dot(np.conj(x_hhl_norm), x_classical_norm))**2
+    print(f"\n  Fidelity: {fidelity:.6f}")
+
+    if fidelity > 0.95:
+        print("  ✓ HHL matches the classical solution!")
+    elif fidelity > 0.80:
+        print("  ~ Approximate match — phase estimation errors present")
+    else:
+        print("  ✗ Mismatch — check parameters")
+
+    if probs_shots is not None:
+        print("\n" + "=" * 60)
+        print("COMPARISON: Shot-based Simulation")
+        print("=" * 60)
+
+        # Reconstruct amplitudes from probabilities
+        # Note: sign information is lost in measurement
+        x_shots = np.sqrt(probs_shots)
+
+        # Try to assign signs from classical solution
+        for i in range(N):
+            if x_classical_norm[i] < 0:
+                x_shots[i] = -x_shots[i]
+
+        x_shots_norm = x_shots / np.linalg.norm(x_shots) if np.linalg.norm(x_shots) > 1e-12 else x_shots
+
+        print(f"\n  Classical x (normalised):  {x_classical_norm}")
+        print(f"  Shots x (normalised):      {x_shots_norm}")
+
+        fidelity_shots = np.abs(np.dot(x_shots_norm, x_classical_norm))**2
+        print(f"\n  Fidelity: {fidelity_shots:.6f}")
+
+
+def align_phase(x_hhl, x_classical):
+    """Remove global phase from HHL solution to align with classical solution.
+    Finds the phase factor e^{i*phi} that best aligns the two vectors."""
+    # Find the component with largest magnitude in classical solution
+    idx = np.argmax(np.abs(x_classical))
+
+    if np.abs(x_hhl[idx]) < 1e-12:
+        return np.real(x_hhl)
+
+    # Compute phase difference at that component
+    phase = x_classical[idx] / x_hhl[idx]
+    phase = phase / np.abs(phase)
+
+    return np.real(x_hhl * phase)
+
+def run_hhl(A, b, n_clock=None):
     """Main function to run HHL and compare with classical solution."""
-    # Validate
+
+    # Validate inputs
     validate_inputs(A, b)
 
-    N = A.shape[0]
-    n_system = int(np.log2(N))
+    # Get system info
+    info = get_system_info(A, b)
+    N = info['N']
+    n_system = info['n_system']
+    eigenvalues = info['eigenvalues']
+    kappa = info['kappa']
+    x_classical_norm = info['x_classical_norm']
 
+    # Choose n_clock automatically if not specified
+    if n_clock is None:
+        # Use enough clock qubits to represent eigenvalues
+        # At minimum 2, scale up with system size
+        n_clock = max(2, n_system + 2)
+
+    # Choose HHL parameters
+    t0, C = choose_parameters(eigenvalues, n_clock)
+
+    # Print system info
     print("=" * 60)
     print("HHL Algorithm Implementation")
     print("=" * 60)
-    print(f"\nSystem size: {N} x {N}")
-    print(f"System qubits: {n_system}")
-    print(f"Clock qubits: {n_clock}")
-    print(f"Total qubits: {n_system + n_clock + 1}")
+    print(f"\n  System size:      {N} x {N}")
+    print(f"  System qubits:    {n_system}")
+    print(f"  Clock qubits:     {n_clock}")
+    print(f"  Total qubits:     {n_system + n_clock + 1}")
+    print(f"\n  Eigenvalues:      {eigenvalues}")
+    print(f"  Condition number: {kappa:.4f}")
+    print(f"  t0:               {t0:.6f}")
+    print(f"  C:                {C:.6f}")
+    print(f"\n  Classical solution (normalised): {x_classical_norm}")
 
-    # Eigenvalue information
-    eigenvalues, _ = get_eigenvalues(A)
-    kappa = np.max(np.abs(eigenvalues)) / np.min(np.abs(eigenvalues))
-    print(f"\nEigenvalues of A: {eigenvalues}")
-    print(f"Condition number: {kappa:.4f}")
+    # Check eigenvalue-to-clock mapping
+    eigenvalue_clock_map = build_eigenvalue_clock_map(eigenvalues, t0, n_clock)
+    print(f"\n  Eigenvalue -> Clock register mapping:")
+    for lam, ctrl_state in eigenvalue_clock_map.items():
+        k = lam * t0 * (2**n_clock) / (2 * np.pi)
+        print(f"    λ = {lam:.4f} -> k = {k:.2f} -> "
+              f"rounded = {int(np.round(k))} -> ctrl = {ctrl_state}")
 
-    # Classical solution
-    x_classical = classical_solve(A, b)
-    print(f"\nClassical solution (normalised): {x_classical}")
+    # Build circuit
+    print(f"\n  Building HHL circuit...")
+    qc, sys_q, clk_q, anc_q = build_hhl_circuit(
+        A, b, n_clock, t0, C, eigenvalues, n_system
+    )
+    print(f"  Circuit depth: {qc.depth()}")
+    print(f"  Gate count:    {qc.size()}")
 
-    # Build and run HHL
-    print(f"\nBuilding HHL circuit...")
-    qc, t0 = build_hhl_circuit(A, b, n_clock)
-    print(f"Circuit depth: {qc.depth()}")
-    print(f"Gate count: {qc.count_ops()}")
+    # Statevector simulation
+    print(f"\n  Running statevector simulation...")
+    x_hhl_norm, p_success = extract_solution_statevector(
+        qc, sys_q, clk_q, anc_q, n_system, n_clock
+    )
+    print(f"  Post-selection probability: {p_success:.6f}")
 
-    print(f"\nRunning HHL on simulator...")
-    x_hhl = extract_solution(qc, n_clock, n_system)
-    print(f"HHL solution (normalised): {x_hhl}")
+    # Shot-based simulation
+    shots = 100000
+    print(f"\n  Running shot-based simulation ({shots} shots)...")
+    probs_shots, post_counts, p_success_shots = extract_solution_shots(
+        qc, sys_q, clk_q, anc_q, n_system, n_clock, shots=shots
+    )
+    print(f"  Post-selection rate: {p_success_shots:.4f}")
+    print(f"  Post-selected counts: {post_counts}")
 
-    # Comparison
-    fidelity = np.abs(np.dot(x_classical.conj(), x_hhl))**2
-    print(f"\nFidelity |<x_classical|x_hhl>|^2: {fidelity:.6f}")
-    print(f"Element-wise comparison:")
-    for i in range(N):
-        print(f"  x[{i}]: classical = {x_classical[i]:.6f}, "
-              f"HHL = {x_hhl[i]:.6f}")
+    # Compare
+    compare_solutions(x_classical_norm, x_hhl_norm, probs_shots)
+
+    # Print circuit
+    print(f"\n{'=' * 60}")
+    print("CIRCUIT")
     print("=" * 60)
+    print(qc.draw(output='text', fold=120))
 
-    return x_classical, x_hhl, fidelity, qc
+    return {
+        'circuit': qc,
+        'x_classical': x_classical_norm,
+        'x_hhl': x_hhl_norm,
+        'fidelity': np.abs(np.dot(np.conj(x_hhl_norm), x_classical_norm))**2,
+        'p_success': p_success,
+        'eigenvalues': eigenvalues,
+        'kappa': kappa,
+        'info': info,
+    }
 
-
-# ============================================================
-# Example usage
-# ============================================================
 
 if __name__ == "__main__":
 
-    # Example 1: 2x2 system
-    print("\n>>> Example 1: 2x2 system\n")
-    A1 = np.array([[2, 1],
-                    [1, 3]], dtype=float)
-    b1 = np.array([1, 0], dtype=float)
-    run_hhl(A1, b1, n_clock=4)
+    # Example 1: 2x2 system (same as your working code)
+    print("\n>>> Example 1: 2x2 system (eigenvalues 1 and 2)\n")
+    A1 = np.array([
+        [1.5, 0.5],
+        [0.5, 1.5]
+    ])
+    b1 = np.array([1.0, 0.0])
+    result1 = run_hhl(A1, b1, n_clock=2)
 
-    # Example 2: 4x4 system
-    print("\n>>> Example 2: 4x4 system\n")
-    A2 = np.array([[4, 1, 0, 0],
-                    [1, 3, 1, 0],
-                    [0, 1, 2, 1],
-                    [0, 0, 1, 5]], dtype=float)
-    b2 = np.array([1, 0, 0, 1], dtype=float)
-    run_hhl(A2, b2, n_clock=6)
+    # Example 2: 2x2 system with different b
+    print("\n\n>>> Example 2: 2x2 system with b = [1, 1]/sqrt(2)\n")
+    A2 = np.array([
+        [1.5, 0.5],
+        [0.5, 1.5]
+    ])
+    b2 = np.array([1.0, 1.0])
+    result2 = run_hhl(A2, b2, n_clock=2)
 
-    # Example 3: User input
-    print("\n>>> Example 3: Custom input\n")
-    print("Enter a Hermitian matrix A and vector b.")
-    print("(Dimensions must be a power of 2)\n")
+    # Example 3: 2x2 system with higher condition number
+    print("\n\n>>> Example 3: 2x2 system with higher condition number\n")
+    A3 = np.array([
+        [2, 1],
+        [1, 3]
+    ])
+    b3 = np.array([1.0, 0.0])
+    result3 = run_hhl(A3, b3, n_clock=4)
 
+    # Example 4: 4x4 system
+    print("\n\n>>> Example 4: 4x4 system\n")
+    A4 = np.array([
+        [4, 1, 0, 0],
+        [1, 3, 1, 0],
+        [0, 1, 2, 1],
+        [0, 0, 1, 5]
+    ])
+    b4 = np.array([1.0, 0.0, 0.0, 1.0])
+    result4 = run_hhl(A4, b4, n_clock=6)
+
+    # Example 5: User input
+    print("\n\n>>> Example 5: Custom input\n")
     try:
-        n = int(input("Enter dimension N: "))
-        print(f"Enter {n}x{n} matrix A row by row "
-              f"(space-separated values):")
-        A_custom = np.zeros((n, n), dtype=complex)
+        n = int(input("Enter dimension N (must be power of 2): "))
+        print(f"Enter {n}x{n} Hermitian matrix A row by row:")
+        A_custom = np.zeros((n, n), dtype=float)
         for i in range(n):
             row = input(f"  Row {i}: ").split()
-            A_custom[i] = [complex(x) for x in row]
+            A_custom[i] = [float(x) for x in row]
 
         print(f"Enter vector b ({n} space-separated values):")
-        b_custom = np.array([complex(x) for x in input("  b: ").split()])
+        b_custom = np.array([float(x) for x in input("  b: ").split()])
 
-        run_hhl(A_custom, b_custom, n_clock=6)
+        nc = int(input("Enter number of clock qubits: "))
+        result_custom = run_hhl(A_custom, b_custom, n_clock=nc)
 
-    except (ValueError, KeyboardInterrupt) as e:
-        print(f"\nSkipping custom input: {e}")
+    except (ValueError, KeyboardInterrupt, EOFError):
+        print("\nSkipping custom input.")
