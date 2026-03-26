@@ -392,59 +392,93 @@ def run_hhl(A, b, n_clock=None):
 
 if __name__ == "__main__":
 
-    # Example 1: 2x2 system (same as your working code)
-    print("\n>>> Example 1: 2x2 system (eigenvalues 1 and 2)\n")
-    A1 = np.array([
-        [1.5, 0.5],
-        [0.5, 1.5]
-    ])
-    b1 = np.array([1.0, 0.0])
-    result1 = run_hhl(A1, b1, n_clock=2)
-
-    # Example 2: 2x2 system with different b
-    print("\n\n>>> Example 2: 2x2 system with b = [1, 1]/sqrt(2)\n")
-    A2 = np.array([
-        [1.5, 0.5],
-        [0.5, 1.5]
-    ])
-    b2 = np.array([1.0, 1.0])
-    result2 = run_hhl(A2, b2, n_clock=2)
-
-    # Example 3: 2x2 system with higher condition number
-    print("\n\n>>> Example 3: 2x2 system with higher condition number\n")
-    A3 = np.array([
-        [2, 1],
-        [1, 3]
-    ])
-    b3 = np.array([1.0, 0.0])
-    result3 = run_hhl(A3, b3, n_clock=4)
-
-    # Example 4: 4x4 system
-    print("\n\n>>> Example 4: 4x4 system\n")
-    A4 = np.array([
-        [4, 1, 0, 0],
-        [1, 3, 1, 0],
-        [0, 1, 2, 1],
-        [0, 0, 1, 5]
-    ])
-    b4 = np.array([1.0, 0.0, 0.0, 1.0])
-    result4 = run_hhl(A4, b4, n_clock=6)
+    # # Example 1: 2x2 system (same as your working code)
+    # print("\n>>> Example 1: 2x2 system (eigenvalues 1 and 2)\n")
+    # A1 = np.array([
+    #     [1.5, 0.5],
+    #     [0.5, 1.5]
+    # ])
+    # b1 = np.array([1.0, 0.0])
+    # result1 = run_hhl(A1, b1, n_clock=2)
+    #
+    # # Example 2: 2x2 system with different b
+    # print("\n\n>>> Example 2: 2x2 system with b = [1, 1]/sqrt(2)\n")
+    # A2 = np.array([
+    #     [1.5, 0.5],
+    #     [0.5, 1.5]
+    # ])
+    # b2 = np.array([1.0, 1.0])
+    # result2 = run_hhl(A2, b2, n_clock=2)
+    #
+    # # Example 3: 2x2 system with higher condition number
+    # print("\n\n>>> Example 3: 2x2 system with higher condition number\n")
+    # A3 = np.array([
+    #     [2, 1],
+    #     [1, 3]
+    # ])
+    # b3 = np.array([1.0, 0.0])
+    # result3 = run_hhl(A3, b3, n_clock=4)
+    #
+    # # Example 4: 4x4 system
+    # print("\n\n>>> Example 4: 4x4 system\n")
+    # A4 = np.array([
+    #     [4, 1, 0, 0],
+    #     [1, 3, 1, 0],
+    #     [0, 1, 2, 1],
+    #     [0, 0, 1, 5]
+    # ])
+    # b4 = np.array([1.0, 0.0, 0.0, 1.0])
+    # result4 = run_hhl(A4, b4, n_clock=6)
 
     # Example 5: User input
-    print("\n\n>>> Example 5: Custom input\n")
-    try:
-        n = int(input("Enter dimension N (must be power of 2): "))
-        print(f"Enter {n}x{n} Hermitian matrix A row by row:")
-        A_custom = np.zeros((n, n), dtype=float)
-        for i in range(n):
-            row = input(f"  Row {i}: ").split()
-            A_custom[i] = [float(x) for x in row]
+    # print("\n\n>>> Example 5: Custom input\n")
+    # try:
+    #     #n = int(input("Enter dimension N (must be power of 2): "))
+    #     print(f"Enter {n}x{n} Hermitian matrix A row by row:")
+    #     A_custom = np.zeros((n, n), dtype=float)
+    #     for i in range(n):
+    #         row = input(f"  Row {i}: ").split()
+    #         A_custom[i] = [float(x) for x in row]
+    #
+    #     print(f"Enter vector b ({n} space-separated values):")
+    #     b_custom = np.array([float(x) for x in input("  b: ").split()])
+    #
+    #     nc = int(input("Enter number of clock qubits: "))
+    #     result_custom = run_hhl(A_custom, b_custom, n_clock=nc)
+    #
+    # except (ValueError, KeyboardInterrupt, EOFError):
+    #     print("\nSkipping custom input.")
 
-        print(f"Enter vector b ({n} space-separated values):")
-        b_custom = np.array([float(x) for x in input("  b: ").split()])
+    # Example: 24 qubit system (256 x 256 matrix)
+    # print("\n\n>>> Large system: 256x256 (24 qubits)\n")
+    # n = 256
+    # n_system = 8
+    # n_clock = 15
+    #
+    # # Build a random sparse Hermitian matrix with controlled condition number
+    # np.random.seed(42)  # for reproducibility
+    #
+    # # Generate random eigenvalues between 1 and 10 (condition number = 10)
+    # eigenvalues_custom = np.random.uniform(1.0, 10.0, size=n)
+    #
+    # # Build random orthogonal matrix for eigenvectors
+    # Q, _ = np.linalg.qr(np.random.randn(n, n))
+    #
+    # # Construct A = Q * diag(eigenvalues) * Q^T
+    # A_large = Q @ np.diag(eigenvalues_custom) @ Q.T
+    #
+    # # Random b vector
+    # b_large = np.random.randn(n)
+    #
+    # result_large = run_hhl(A_large, b_large, n_clock=n_clock)
 
-        nc = int(input("Enter number of clock qubits: "))
-        result_custom = run_hhl(A_custom, b_custom, n_clock=nc)
 
-    except (ValueError, KeyboardInterrupt, EOFError):
-        print("\nSkipping custom input.")
+    # Practical large example: 32 x 32 (18 qubits)
+    # print("\n\n>>> Large system: 32x32 (18 qubits)\n")
+    # n = 32
+    # np.random.seed(42)
+    # eigenvalues_custom = np.random.uniform(1.0, 10.0, size=n)
+    # Q, _ = np.linalg.qr(np.random.randn(n, n))
+    # A_med = Q @ np.diag(eigenvalues_custom) @ Q.T
+    # b_med = np.random.randn(n)
+    # result_med = run_hhl(A_med, b_med, n_clock=12)
