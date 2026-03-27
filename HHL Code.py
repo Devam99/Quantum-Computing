@@ -4,6 +4,7 @@ from qiskit import QuantumCircuit, ClassicalRegister, transpile
 from qiskit.circuit.library import UnitaryGate, RYGate, QFTGate, HamiltonianGate
 from qiskit.quantum_info import Statevector
 from qiskit_aer import AerSimulator
+import matplotlib.pyplot as plt
 
 def validate_inputs(A, b):
     """Check that A is Hermitian, square, invertible, dimensions are
@@ -437,6 +438,35 @@ def run_hhl(A, b, n_clock=None, use_trotter=False, trotter_steps=4):
         'info': info,
     }
 
+def export_circuit_diagrams(A, b, n_clock, label='', use_trotter=False):
+    """Export circuit diagrams for the dissertation."""
+    info = get_system_info(A, b)
+    eigenvalues = info['eigenvalues']
+    n_system = info['n_system']
+    t0, C = choose_parameters(eigenvalues, n_clock)
+
+    # Full HHL circuit
+    qc, sys_q, clk_q, anc_q = build_hhl_circuit(
+        A, b, n_clock, t0, C, eigenvalues, n_system,
+        use_trotter=use_trotter
+    )
+
+    fig = qc.draw(output='mpl', fold=30, style={'fontsize': 10})
+    fig.savefig(f'hhl_circuit_{label}.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Saved hhl_circuit_{label}.png")
+
+    # Circuit stats
+    stats = {
+        'depth': qc.depth(),
+        'gate_count': qc.size(),
+        'n_system': n_system,
+        'n_clock': n_clock,
+        'total_qubits': n_system + n_clock + 1,
+    }
+
+    return stats
+
 
 if __name__ == "__main__":
 
@@ -522,11 +552,26 @@ if __name__ == "__main__":
     #
     #
     # Practical large example: 32 x 32 (18 qubits)
-    print("\n\n>>> Large system: 32x32 (18 qubits)\n")
-    n = 32
-    np.random.seed(42)
-    eigenvalues_custom = np.random.uniform(1.0, 10.0, size=n)
-    Q, _ = np.linalg.qr(np.random.randn(n, n))
-    A_med = Q @ np.diag(eigenvalues_custom) @ Q.T
-    b_med = np.random.randn(n)
-    result_med = run_hhl(A_med, b_med, n_clock=12, use_trotter=False)
+    # print("\n\n>>> Large system: 32x32 (18 qubits)\n")
+    # n = 32
+    # np.random.seed(42)
+    # eigenvalues_custom = np.random.uniform(1.0, 10.0, size=n)
+    # Q, _ = np.linalg.qr(np.random.randn(n, n))
+    # A_med = Q @ np.diag(eigenvalues_custom) @ Q.T
+    # b_med = np.random.randn(n)
+    # result_med = run_hhl(A_med, b_med, n_clock=12, use_trotter=False)
+
+    # Generate diagrams for dissertation
+
+    # 2x2 circuit diagram
+    A1 = np.array([[1.5, 0.5], [0.5, 1.5]])
+    b1 = np.array([1.0, 0.0])
+    stats1 = export_circuit_diagrams(A1, b1, n_clock=2, label='2x2')
+
+    # 4x4 circuit diagram
+    A4 = np.array([[4,1,0,0],[1,3,1,0],[0,1,2,1],[0,0,1,5]], dtype=float)
+    b4 = np.array([1.0, 0.0, 0.0, 1.0])
+    stats4 = export_circuit_diagrams(A4, b4, n_clock=6, label='4x4')
+
+    print(f"\n2x2 stats: {stats1}")
+    print(f"4x4 stats: {stats4}")
