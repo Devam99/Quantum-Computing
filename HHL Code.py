@@ -470,6 +470,99 @@ def export_circuit_diagrams(A, b, n_clock, label='', use_trotter=False):
 
     return stats
 
+def generate_examples():
+    """Generate test examples for Chapter 6."""
+    examples = {}
+
+    # 2x2: eigenvalues 1, 2 (kappa = 2)
+    examples['2x2'] = {
+        'A': np.array([[1.5, 0.5],
+                        [0.5, 1.5]]),
+        'b': np.array([1.0, 0.0]),
+        'n_clock': 2,
+    }
+
+    # 4x4: eigenvalues 1, 2, 3, 4 (kappa = 4)
+    Q4, _ = np.linalg.qr(np.array([
+        [1, 1, 1, 1],
+        [1, -1, 1, -1],
+        [1, 1, -1, -1],
+        [1, -1, -1, 1]
+    ], dtype=float))
+    examples['4x4'] = {
+        'A': Q4 @ np.diag([1.0, 2.0, 3.0, 4.0]) @ Q4.T,
+        'b': np.array([1.0, 1.0, 0.0, 0.0]),
+        'n_clock': 4,
+    }
+
+    # 8x8: eigenvalues 1, 2, 3, 4, 5, 6, 7, 8 (kappa = 8)
+    np.random.seed(42)
+    Q8, _ = np.linalg.qr(np.random.randn(8, 8))
+    examples['8x8'] = {
+        'A': Q8 @ np.diag([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]) @ Q8.T,
+        'b': np.zeros(8),
+        'n_clock': 6,
+    }
+    examples['8x8']['b'][0] = 1.0
+    examples['8x8']['b'][7] = 1.0
+    examples['8x8']['b'] = examples['8x8']['b'] / np.linalg.norm(examples['8x8']['b'])
+
+    # 16x16: eigenvalues 1, 2, ..., 16 (kappa = 16)
+    np.random.seed(43)
+    Q16, _ = np.linalg.qr(np.random.randn(16, 16))
+    eigs16 = np.arange(1, 17, dtype=float)
+    examples['16x16'] = {
+        'A': Q16 @ np.diag(eigs16) @ Q16.T,
+        'b': np.zeros(16),
+        'n_clock': 8,
+    }
+    examples['16x16']['b'][0] = 1.0
+    examples['16x16']['b'][15] = 1.0
+    examples['16x16']['b'] = examples['16x16']['b'] / np.linalg.norm(examples['16x16']['b'])
+
+    # 32x32: eigenvalues 1, 2, ..., 32 (kappa = 32)
+    np.random.seed(44)
+    Q32, _ = np.linalg.qr(np.random.randn(32, 32))
+    eigs32 = np.arange(1, 33, dtype=float)
+    examples['32x32'] = {
+        'A': Q32 @ np.diag(eigs32) @ Q32.T,
+        'b': np.zeros(32),
+        'n_clock': 10,
+    }
+    examples['32x32']['b'][0] = 1.0
+    examples['32x32']['b'][31] = 1.0
+    examples['32x32']['b'] = examples['32x32']['b'] / np.linalg.norm(examples['32x32']['b'])
+
+    return examples
+
+
+def run_all_examples():
+    """Run all examples and collect results."""
+    examples = generate_examples()
+    results = {}
+
+    for name, ex in examples.items():
+        print(f"\n\n{'#' * 60}")
+        print(f"  EXAMPLE: {name}")
+        print(f"{'#' * 60}\n")
+        results[name] = run_hhl(ex['A'], ex['b'], n_clock=ex['n_clock'])
+
+    # Print summary table
+    print(f"\n\n{'=' * 80}")
+    print(f"{'SUMMARY':^80}")
+    print(f"{'=' * 80}")
+    print(f"{'System':<10} {'Qubits':<10} {'Kappa':<10} {'Fidelity':<12} "
+          f"{'P(success)':<12} {'Depth':<10}")
+    print(f"{'-' * 80}")
+
+    for name, r in results.items():
+        n_total = r['info']['n_system'] + r['circuit'].num_qubits - r['info']['n_system']
+        print(f"{name:<10} {r['circuit'].num_qubits:<10} "
+              f"{r['kappa']:<10.2f} {r['fidelity']:<12.6f} "
+              f"{r['p_success']:<12.6f} {r['circuit'].depth():<10}")
+
+    return results
+
 
 if __name__ == "__main__":
 
@@ -567,14 +660,17 @@ if __name__ == "__main__":
     # Generate diagrams for dissertation
 
     # 2x2 circuit diagram
-    A1 = np.array([[1.5, 0.5], [0.5, 1.5]])
-    b1 = np.array([1.0, 0.0])
-    stats1 = export_circuit_diagrams(A1, b1, n_clock=2, label='2x2')
+    # A1 = np.array([[1.5, 0.5], [0.5, 1.5]])
+    # b1 = np.array([1.0, 0.0])
+    # stats1 = export_circuit_diagrams(A1, b1, n_clock=2, label='2x2')
+    #
+    # # 4x4 circuit diagram
+    # A4 = np.array([[4,1,0,0],[1,3,1,0],[0,1,2,1],[0,0,1,5]], dtype=float)
+    # b4 = np.array([1.0, 0.0, 0.0, 1.0])
+    # stats4 = export_circuit_diagrams(A4, b4, n_clock=6, label='4x4')
+    #
+    # print(f"\n2x2 stats: {stats1}")
+    # print(f"4x4 stats: {stats4}")
 
-    # 4x4 circuit diagram
-    A4 = np.array([[4,1,0,0],[1,3,1,0],[0,1,2,1],[0,0,1,5]], dtype=float)
-    b4 = np.array([1.0, 0.0, 0.0, 1.0])
-    stats4 = export_circuit_diagrams(A4, b4, n_clock=6, label='4x4')
+    results = run_all_examples()
 
-    print(f"\n2x2 stats: {stats1}")
-    print(f"4x4 stats: {stats4}")
