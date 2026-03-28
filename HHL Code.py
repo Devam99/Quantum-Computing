@@ -527,7 +527,7 @@ def generate_examples():
     examples['32x32'] = {
         'A': Q32 @ np.diag(eigs32) @ Q32.T,
         'b': np.zeros(32),
-        'n_clock': 10,
+        'n_clock': 14,
     }
     examples['32x32']['b'][0] = 1.0
     examples['32x32']['b'][31] = 1.0
