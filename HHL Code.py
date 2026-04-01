@@ -471,7 +471,7 @@ def export_circuit_diagrams(A, b, n_clock, label='', use_trotter=False):
 
     return stats
 
-def generate_examples():
+def generate_examples(include_32=False):
     """Generate test examples for Chapter 6."""
     examples = {}
 
@@ -483,7 +483,7 @@ def generate_examples():
         'n_clock': 2,
     }
 
-    # 4x4: eigenvalues 1, 2, 3, 4 (kappa = 4)
+    # 4x4
     Q4, _ = np.linalg.qr(np.array([
         [1, 1, 1, 1],
         [1, -1, 1, -1],
@@ -496,7 +496,7 @@ def generate_examples():
         'n_clock': 4,
     }
 
-    # 8x8: eigenvalues 1, 2, 3, 4, 5, 6, 7, 8 (kappa = 8)
+    # 8x8
     np.random.seed(42)
     Q8, _ = np.linalg.qr(np.random.randn(8, 8))
     examples['8x8'] = {
@@ -506,9 +506,9 @@ def generate_examples():
     }
     examples['8x8']['b'][0] = 1.0
     examples['8x8']['b'][7] = 1.0
-    examples['8x8']['b'] = examples['8x8']['b'] / np.linalg.norm(examples['8x8']['b'])
+    examples['8x8']['b'] /= np.linalg.norm(examples['8x8']['b'])
 
-    # 16x16: eigenvalues 1, 2, ..., 16 (kappa = 16)
+    # 16x16
     np.random.seed(43)
     Q16, _ = np.linalg.qr(np.random.randn(16, 16))
     eigs16 = np.arange(1, 17, dtype=float)
@@ -519,20 +519,21 @@ def generate_examples():
     }
     examples['16x16']['b'][0] = 1.0
     examples['16x16']['b'][15] = 1.0
-    examples['16x16']['b'] = examples['16x16']['b'] / np.linalg.norm(examples['16x16']['b'])
+    examples['16x16']['b'] /= np.linalg.norm(examples['16x16']['b'])
 
-    # 32x32: eigenvalues 1, 2, ..., 32 (kappa = 32)
-    np.random.seed(44)
-    Q32, _ = np.linalg.qr(np.random.randn(32, 32))
-    eigs32 = np.arange(1, 33, dtype=float)
-    examples['32x32'] = {
-        'A': Q32 @ np.diag(eigs32) @ Q32.T,
-        'b': np.zeros(32),
-        'n_clock': 14,
-    }
-    examples['32x32']['b'][0] = 1.0
-    examples['32x32']['b'][31] = 1.0
-    examples['32x32']['b'] = examples['32x32']['b'] / np.linalg.norm(examples['32x32']['b'])
+    # 32x32 — optional, slow
+    if include_32:
+        np.random.seed(44)
+        Q32, _ = np.linalg.qr(np.random.randn(32, 32))
+        eigs32 = np.arange(1, 33, dtype=float)
+        examples['32x32'] = {
+            'A': Q32 @ np.diag(eigs32) @ Q32.T,
+            'b': np.zeros(32),
+            'n_clock': 14,
+        }
+        examples['32x32']['b'][0] = 1.0
+        examples['32x32']['b'][31] = 1.0
+        examples['32x32']['b'] /= np.linalg.norm(examples['32x32']['b'])
 
     return examples
 
@@ -715,6 +716,94 @@ def run_shot_comparison(examples=None, shots=100000):
     return results
 
 
+def experiment_1_precision(A=None, b=None, n_clock_range=None, label='8x8'):
+    """Experiment 1: Fidelity as a function of clock qubits for fixed system."""
+    if A is None:
+        examples = generate_examples()
+        A = examples['8x8']['A']
+        b = examples['8x8']['b']
+
+    if n_clock_range is None:
+        n_clock_range = [3, 4, 5, 6, 7, 8]
+
+    info = get_system_info(A, b)
+    eigenvalues = info['eigenvalues']
+    kappa = info['kappa']
+    x_classical_norm = info['x_classical_norm']
+    n_system = info['n_system']
+
+    print(f"\n{'=' * 70}")
+    print(f"{'EXPERIMENT 1: Phase Estimation Precision vs Fidelity':^70}")
+    print(f"{'=' * 70}")
+    print(f"  System: {label}, kappa = {kappa:.2f}")
+    print(f"  Clock qubits tested: {n_clock_range}")
+    print(f"\n{'nc':<6} {'kappa/2^nc':<14} {'Fidelity':<12} "
+          f"{'p_success':<12} {'Depth':<8}")
+    print(f"{'-' * 70}")
+
+    results = []
+    for nc in n_clock_range:
+        t0, C = choose_parameters(eigenvalues, nc)
+        qc, sys_q, clk_q, anc_q = build_hhl_circuit(
+            A, b, nc, t0, C, eigenvalues, n_system
+        )
+        x_hhl, p_success = extract_solution_statevector(
+            qc, sys_q, clk_q, anc_q, n_system, nc
+        )
+        fidelity = np.abs(np.dot(np.conj(x_hhl), x_classical_norm)) ** 2
+        ratio = kappa / (2 ** nc)
+        depth = qc.depth()
+
+        results.append({
+            'n_clock': nc,
+            'ratio': ratio,
+            'fidelity': fidelity,
+            'p_success': p_success,
+            'depth': depth,
+        })
+        print(f"{nc:<6} {ratio:<14.4f} {fidelity:<12.6f} "
+              f"{p_success:<12.6f} {depth:<8}")
+
+    # Plot
+    fig, ax1 = plt.subplots(figsize=(8, 5))
+
+    ncs = [r['n_clock'] for r in results]
+    fids = [r['fidelity'] for r in results]
+    ratios = [r['ratio'] for r in results]
+
+    color1 = 'tab:blue'
+    color2 = 'tab:red'
+
+    ax1.plot(ncs, fids, 'o-', color=color1, linewidth=2,
+             markersize=8, label='Measured fidelity')
+    ax1.set_xlabel('Clock qubits $n_c$', fontsize=12)
+    ax1.set_ylabel('Fidelity', fontsize=12, color=color1)
+    ax1.tick_params(axis='y', labelcolor=color1)
+    ax1.set_ylim([0, 1.05])
+    ax1.set_xticks(ncs)
+
+    ax2 = ax1.twinx()
+    ax2.plot(ncs, ratios, 's--', color=color2, linewidth=2,
+             markersize=8, label=r'$\kappa / 2^{n_c}$')
+    ax2.set_ylabel(r'$\kappa / 2^{n_c}$', fontsize=12, color=color2)
+    ax2.tick_params(axis='y', labelcolor=color2)
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='center right',
+               fontsize=11)
+
+    plt.title(f'Experiment 1: Precision vs Fidelity ({label}, '
+              rf'$\kappa = {kappa:.0f}$)', fontsize=13)
+    plt.tight_layout()
+    plt.savefig(f'figures/exp1_precision_{label}.png', dpi=300,
+                bbox_inches='tight')
+    plt.close()
+    print(f"\n  Plot saved: figures/exp1_precision_{label}.png")
+
+    return results
+
+
 if __name__ == "__main__":
 
     # Example 1: 2x2 system (same as your working code)
@@ -825,4 +914,6 @@ if __name__ == "__main__":
 
     results = run_all_examples()
     comparison = run_classical_comparison()
+    shot_results = run_shot_comparison()
+    exp1 = experiment_1_precision()
 
