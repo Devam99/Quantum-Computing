@@ -719,12 +719,18 @@ def run_shot_comparison(examples=None, shots=100000):
 def experiment_1_precision(A=None, b=None, n_clock_range=None, label='8x8'):
     """Experiment 1: Fidelity as a function of clock qubits for fixed system."""
     if A is None:
-        examples = generate_examples()
-        A = examples['8x8']['A']
-        b = examples['8x8']['b']
+        # Use NON-INTEGER eigenvalues so phase estimation precision matters
+        np.random.seed(42)
+        Q, _ = np.linalg.qr(np.random.randn(8, 8))
+        eigs = np.array([0.5, 1.3, 2.7, 3.1, 4.8, 5.5, 6.2, 7.9])
+        A = Q @ np.diag(eigs) @ Q.T
+        b = np.zeros(8)
+        b[0] = 1.0
+        b[7] = 1.0
+        b = b / np.linalg.norm(b)
 
     if n_clock_range is None:
-        n_clock_range = [3, 4, 5, 6, 7, 8]
+        n_clock_range = [3, 4, 5, 6, 7, 8, 9, 10]
 
     info = get_system_info(A, b)
     eigenvalues = info['eigenvalues']
@@ -736,6 +742,7 @@ def experiment_1_precision(A=None, b=None, n_clock_range=None, label='8x8'):
     print(f"{'EXPERIMENT 1: Phase Estimation Precision vs Fidelity':^70}")
     print(f"{'=' * 70}")
     print(f"  System: {label}, kappa = {kappa:.2f}")
+    print(f"  Eigenvalues: {eigenvalues}")
     print(f"  Clock qubits tested: {n_clock_range}")
     print(f"\n{'nc':<6} {'kappa/2^nc':<14} {'Fidelity':<12} "
           f"{'p_success':<12} {'Depth':<8}")
@@ -794,7 +801,7 @@ def experiment_1_precision(A=None, b=None, n_clock_range=None, label='8x8'):
                fontsize=11)
 
     plt.title(f'Experiment 1: Precision vs Fidelity ({label}, '
-              rf'$\kappa = {kappa:.0f}$)', fontsize=13)
+              rf'$\kappa = {kappa:.1f}$)', fontsize=13)
     plt.tight_layout()
     plt.savefig(f'figures/exp1_precision_{label}.png', dpi=300,
                 bbox_inches='tight')
