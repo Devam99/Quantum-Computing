@@ -825,4 +825,5 @@ if __name__ == "__main__":
 
     results = run_all_examples()
     comparison = run_classical_comparison()
+    shot_results = run_shot_comparison()
 
