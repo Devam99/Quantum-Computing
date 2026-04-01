@@ -644,6 +644,76 @@ def run_classical_comparison(examples=None):
 
     return results
 
+def run_shot_comparison(examples=None, shots=100000):
+    """Generate shot-based results table for Chapter 6."""
+    if examples is None:
+        examples = generate_examples()
+
+    # Only run manageable sizes
+    skip = ['32x32']
+
+    print(f"\n{'=' * 85}")
+    print(f"{'SHOT-BASED vs STATEVECTOR COMPARISON':^85}")
+    print(f"{'=' * 85}")
+    print(f"{'System':<10} {'SV Fidelity':<14} {'Shot Fidelity':<14} "
+          f"{'p(SV)':<10} {'p(shots)':<10} {'Post shots':<12}")
+    print(f"{'-' * 85}")
+
+    results = {}
+
+    for name, ex in examples.items():
+        if name in skip:
+            continue
+
+        A = ex['A']
+        b = ex['b']
+        nc = ex['n_clock']
+
+        info = get_system_info(A, b)
+        eigenvalues = info['eigenvalues']
+        n_system = info['n_system']
+        x_classical_norm = info['x_classical_norm']
+
+        t0, C = choose_parameters(eigenvalues, nc)
+        qc, sys_q, clk_q, anc_q = build_hhl_circuit(
+            A, b, nc, t0, C, eigenvalues, n_system
+        )
+
+        # Statevector
+        x_sv, p_sv = extract_solution_statevector(
+            qc, sys_q, clk_q, anc_q, n_system, nc
+        )
+        fid_sv = np.abs(np.dot(np.conj(x_sv), x_classical_norm))**2
+
+        # Shots
+        probs, counts, p_shots = extract_solution_shots(
+            qc, sys_q, clk_q, anc_q, n_system, nc, shots=shots
+        )
+        total_post = sum(counts.values()) if counts else 0
+
+        # Reconstruct amplitudes from probabilities with sign from classical
+        x_shots = np.sqrt(probs)
+        for i in range(len(x_classical_norm)):
+            if x_classical_norm[i] < 0:
+                x_shots[i] = -x_shots[i]
+        norm = np.linalg.norm(x_shots)
+        if norm > 1e-12:
+            x_shots = x_shots / norm
+        fid_shots = np.abs(np.dot(x_shots, x_classical_norm))**2
+
+        print(f"{name:<10} {fid_sv:<14.6f} {fid_shots:<14.6f} "
+              f"{p_sv:<10.6f} {p_shots:<10.4f} {total_post:<12}")
+
+        results[name] = {
+            'fid_sv': fid_sv,
+            'fid_shots': fid_shots,
+            'p_sv': p_sv,
+            'p_shots': p_shots,
+            'total_post': total_post,
+        }
+
+    return results
+
 
 if __name__ == "__main__":
 
