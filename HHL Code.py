@@ -8,6 +8,7 @@ from qiskit import QuantumCircuit, ClassicalRegister, transpile
 from qiskit.circuit.library import UnitaryGate, RYGate, QFTGate, HamiltonianGate
 from qiskit.quantum_info import Statevector
 from qiskit_aer import AerSimulator
+from qiskit_aer.noise import NoiseModel, depolarizing_error
 
 
 def validate_inputs(A, b):
@@ -65,15 +66,16 @@ def choose_parameters(eigenvalues, n_clock):
 
 
 def build_hhl_circuit(A, b, n_clock, t0, C, eigenvalues, n_system,
-                      use_trotter=False, trotter_steps=4):
-    """Build the full HHL circuit for arbitrary A and b.
+                      use_trotter=False, trotter_steps=4,
+                      full_rotation=False):
+    """Build the full HHL circuit.
 
     Parameters:
-        use_trotter: if True, use Trotter decomposition for Hamiltonian
-                     simulation instead of dense expm. Recommended for
-                     n_system >= 3.
-        trotter_steps: number of Trotter steps (higher = more accurate
-                       but deeper circuit).
+        full_rotation: if True, program a rotation for EVERY clock
+                       register state k=1,...,2^n_clock - 1, not just
+                       the states corresponding to known eigenvalues.
+                       Required for correct behavior with non-integer
+                       eigenvalues. Expensive: O(2^n_clock) rotations.
     """
     N = 2 ** n_system
     n_total = n_clock + n_system + 1
@@ -93,7 +95,6 @@ def build_hhl_circuit(A, b, n_clock, t0, C, eigenvalues, n_system,
 
     for j, c in enumerate(clk_q):
         if use_trotter:
-            # Build Trotter circuit for e^{iA * t0 * 2^j}
             trotter_qc = build_trotter_circuit(
                 A, t0 * (2 ** j), n_system, trotter_steps
             )
@@ -112,17 +113,41 @@ def build_hhl_circuit(A, b, n_clock, t0, C, eigenvalues, n_system,
     qc.barrier(label='QPE done')
 
     # Step 3: Controlled rotations
-    eigenvalue_clock_map = build_eigenvalue_clock_map(
-        eigenvalues, t0, n_clock
-    )
+    if full_rotation:
+        # Rotation for EVERY clock state k = 1, ..., 2^n_clock - 1
+        for k in range(1, 2 ** n_clock):
+            lam_k = k * 2 * np.pi / (t0 * (2 ** n_clock))
+            ratio = C / lam_k
+            if np.abs(ratio) > 1:
+                ratio = np.sign(ratio)
+            theta = 2 * np.arcsin(ratio)
 
-    for lam, ctrl_state in eigenvalue_clock_map.items():
-        ratio = C / lam
-        if np.abs(ratio) > 1:
-            ratio = np.sign(ratio)
-        theta = 2 * np.arcsin(ratio)
-        cry_gate = RYGate(theta).control(n_clock, ctrl_state=ctrl_state)
-        qc.append(cry_gate, clk_q + [anc_q])
+            # Skip negligibly small rotations
+            if np.abs(theta) < 1e-10:
+                continue
+
+            ctrl_state = format(k, f'0{n_clock}b')
+            cry_gate = RYGate(theta).control(
+                n_clock, ctrl_state=ctrl_state
+            )
+            qc.append(cry_gate, clk_q + [anc_q])
+    else:
+        # Original: only known eigenvalues
+        eigenvalue_clock_map = build_eigenvalue_clock_map(
+            eigenvalues, t0, n_clock
+        )
+        for lam, info_dict in eigenvalue_clock_map.items():
+            ctrl_state = info_dict['ctrl_state']
+            lam_rounded = info_dict['lam_rounded']
+
+            ratio = C / lam_rounded
+            if np.abs(ratio) > 1:
+                ratio = np.sign(ratio)
+            theta = 2 * np.arcsin(ratio)
+            cry_gate = RYGate(theta).control(
+                n_clock, ctrl_state=ctrl_state
+            )
+            qc.append(cry_gate, clk_q + [anc_q])
 
     qc.barrier(label='Rotations done')
 
@@ -152,13 +177,8 @@ def build_hhl_circuit(A, b, n_clock, t0, C, eigenvalues, n_system,
 
 
 def build_eigenvalue_clock_map(eigenvalues, t0, n_clock):
-    """Map each eigenvalue to its binary control string for the clock register.
-
-    After QPE, eigenvalue lambda_j is stored as integer
-    k_j = lambda_j * t0 * 2^n_clock / (2*pi) in the clock register.
-
-    The control string must match Qiskit's qubit ordering for the
-    multi-controlled gate."""
+    """Map each eigenvalue to its binary control string and
+    the rounded eigenvalue that the clock register actually stores."""
     clock_map = {}
 
     for lam in eigenvalues:
@@ -168,12 +188,17 @@ def build_eigenvalue_clock_map(eigenvalues, t0, n_clock):
         if k_rounded == 0:
             continue
 
-        # Binary string with n_clock bits
-        # Qiskit ctrl_state expects LSB first ordering
         ctrl_state = format(k_rounded, f'0{n_clock}b')
 
+        # Recover the eigenvalue the clock register actually represents
+        lam_rounded = k_rounded * 2 * np.pi / (t0 * (2 ** n_clock))
+
         if lam not in clock_map:
-            clock_map[lam] = ctrl_state
+            clock_map[lam] = {
+                'ctrl_state': ctrl_state,
+                'k_rounded': k_rounded,
+                'lam_rounded': lam_rounded,
+            }
 
     return clock_map
 
@@ -397,10 +422,10 @@ def run_hhl(A, b, n_clock=None, use_trotter=False, trotter_steps=4):
 
     eigenvalue_clock_map = build_eigenvalue_clock_map(eigenvalues, t0, n_clock)
     print(f"\n  Eigenvalue -> Clock register mapping:")
-    for lam, ctrl_state in eigenvalue_clock_map.items():
-        k = lam * t0 * (2**n_clock) / (2 * np.pi)
-        print(f"    λ = {lam:.4f} -> k = {k:.2f} -> "
-              f"rounded = {int(np.round(k))} -> ctrl = {ctrl_state}")
+    for lam, info_dict in eigenvalue_clock_map.items():
+        print(f"    λ = {lam:.4f} -> k = {info_dict['k_rounded']} -> "
+              f"λ_rounded = {info_dict['lam_rounded']:.4f} -> "
+              f"ctrl = {info_dict['ctrl_state']}")
 
     print(f"\n  Building HHL circuit...")
     qc, sys_q, clk_q, anc_q = build_hhl_circuit(
@@ -716,67 +741,73 @@ def run_shot_comparison(examples=None, shots=100000):
     return results
 
 
-def experiment_1_precision(A=None, b=None, n_clock_range=None, label='8x8'):
-    """Experiment 1: Fidelity as a function of clock qubits for fixed system."""
-    if A is None:
-        # Use NON-INTEGER eigenvalues so phase estimation precision matters
-        np.random.seed(42)
-        Q, _ = np.linalg.qr(np.random.randn(8, 8))
-        eigs = np.array([0.5, 1.3, 2.7, 3.1, 4.8, 5.5, 6.2, 7.9])
-        A = Q @ np.diag(eigs) @ Q.T
-        b = np.zeros(8)
-        b[0] = 1.0
-        b[7] = 1.0
-        b = b / np.linalg.norm(b)
+def experiment_1_precision(n_clock_range=None, label='4x4_nonint'):
+    """Experiment 1: Fidelity vs clock qubits with full rotation."""
+
+    np.random.seed(42)
+    Q, _ = np.linalg.qr(np.random.randn(4, 4))
+    eigs = np.array([0.5, 2.0, 3.5, 5.5])
+    A = Q @ np.diag(eigs) @ Q.T
+
+    b = np.array([1.0, 0.0, 0.0, 1.0])
+    b = b / np.linalg.norm(b)
 
     if n_clock_range is None:
-        n_clock_range = [3, 4, 5, 6, 7, 8, 9, 10]
+        n_clock_range = [3, 4, 5, 6, 7, 8]
 
     info = get_system_info(A, b)
     eigenvalues = info['eigenvalues']
     kappa = info['kappa']
-    x_classical_norm = info['x_classical_norm']
     n_system = info['n_system']
+    x_classical_norm = info['x_classical_norm']
 
-    print(f"\n{'=' * 70}")
-    print(f"{'EXPERIMENT 1: Phase Estimation Precision vs Fidelity':^70}")
-    print(f"{'=' * 70}")
-    print(f"  System: {label}, kappa = {kappa:.2f}")
+    t0 = 1.0
+    C = np.min(np.abs(eigenvalues))
+
+    print(f"\n{'=' * 75}")
+    print(f"{'EXPERIMENT 1: Phase Estimation Precision vs Fidelity':^75}")
+    print(f"{'=' * 75}")
+    print(f"  System: 4x4, kappa = {kappa:.2f}")
     print(f"  Eigenvalues: {eigenvalues}")
-    print(f"  Clock qubits tested: {n_clock_range}")
-    print(f"\n{'nc':<6} {'kappa/2^nc':<14} {'Fidelity':<12} "
-          f"{'p_success':<12} {'Depth':<8}")
-    print(f"{'-' * 70}")
+    print(f"  t0 = {t0} (fixed)")
+    print(f"  Using full_rotation=True")
+    print(f"\n{'nc':<6} {'Resolution':<12} {'Fidelity':<12} "
+          f"{'p_success':<12} {'Depth':<8} {'Rotations':<10}")
+    print(f"{'-' * 75}")
 
     results = []
     for nc in n_clock_range:
-        t0, C = choose_parameters(eigenvalues, nc)
         qc, sys_q, clk_q, anc_q = build_hhl_circuit(
-            A, b, nc, t0, C, eigenvalues, n_system
+            A, b, nc, t0, C, eigenvalues, n_system,
+            full_rotation=True
         )
         x_hhl, p_success = extract_solution_statevector(
             qc, sys_q, clk_q, anc_q, n_system, nc
         )
-        fidelity = np.abs(np.dot(np.conj(x_hhl), x_classical_norm)) ** 2
-        ratio = kappa / (2 ** nc)
+        fidelity = np.abs(
+            np.dot(np.conj(x_hhl), x_classical_norm)
+        ) ** 2
+        resolution = 2 * np.pi / (2 ** nc)
         depth = qc.depth()
+        n_rotations = 2 ** nc - 1
 
         results.append({
             'n_clock': nc,
-            'ratio': ratio,
+            'resolution': resolution,
             'fidelity': fidelity,
             'p_success': p_success,
             'depth': depth,
+            'n_rotations': n_rotations,
         })
-        print(f"{nc:<6} {ratio:<14.4f} {fidelity:<12.6f} "
-              f"{p_success:<12.6f} {depth:<8}")
+        print(f"{nc:<6} {resolution:<12.4f} {fidelity:<12.6f} "
+              f"{p_success:<12.6f} {depth:<8} {n_rotations:<10}")
 
     # Plot
     fig, ax1 = plt.subplots(figsize=(8, 5))
 
     ncs = [r['n_clock'] for r in results]
     fids = [r['fidelity'] for r in results]
-    ratios = [r['ratio'] for r in results]
+    ress = [r['resolution'] for r in results]
 
     color1 = 'tab:blue'
     color2 = 'tab:red'
@@ -790,9 +821,9 @@ def experiment_1_precision(A=None, b=None, n_clock_range=None, label='8x8'):
     ax1.set_xticks(ncs)
 
     ax2 = ax1.twinx()
-    ax2.plot(ncs, ratios, 's--', color=color2, linewidth=2,
-             markersize=8, label=r'$\kappa / 2^{n_c}$')
-    ax2.set_ylabel(r'$\kappa / 2^{n_c}$', fontsize=12, color=color2)
+    ax2.plot(ncs, ress, 's--', color=color2, linewidth=2,
+             markersize=8, label=r'Resolution $2\pi/2^{n_c}$')
+    ax2.set_ylabel('Eigenvalue resolution', fontsize=12, color=color2)
     ax2.tick_params(axis='y', labelcolor=color2)
 
     lines1, labels1 = ax1.get_legend_handles_labels()
@@ -800,13 +831,279 @@ def experiment_1_precision(A=None, b=None, n_clock_range=None, label='8x8'):
     ax1.legend(lines1 + lines2, labels1 + labels2, loc='center right',
                fontsize=11)
 
-    plt.title(f'Experiment 1: Precision vs Fidelity ({label}, '
-              rf'$\kappa = {kappa:.1f}$)', fontsize=13)
+    plt.title(f'Experiment 1: Precision vs Fidelity '
+              rf'($\kappa = {kappa:.1f}$)', fontsize=13)
     plt.tight_layout()
     plt.savefig(f'figures/exp1_precision_{label}.png', dpi=300,
                 bbox_inches='tight')
     plt.close()
     print(f"\n  Plot saved: figures/exp1_precision_{label}.png")
+
+    return results
+
+def experiment_2_kappa(n_system=2, kappas=None, label='kappa_scaling'):
+    """Experiment 2: Success probability and fidelity vs condition number
+    at fixed system size."""
+    if kappas is None:
+        kappas = [2, 4, 8, 16, 32, 64]
+
+    N = 2 ** n_system
+    np.random.seed(42)
+    Q, _ = np.linalg.qr(np.random.randn(N, N))
+
+    b = np.ones(N)
+    b = b / np.linalg.norm(b)
+
+    print(f"\n{'=' * 80}")
+    print(f"{'EXPERIMENT 2: Condition Number Scaling':^80}")
+    print(f"{'=' * 80}")
+    print(f"  System size: {N}x{N}")
+    print(f"  Kappas tested: {kappas}")
+    print(f"\n{'kappa':<8} {'nc':<6} {'Fidelity':<12} {'p_success':<12} "
+          f"{'1/kappa^2':<12} {'Depth':<8}")
+    print(f"{'-' * 80}")
+
+    results = []
+    for kappa in kappas:
+        # Eigenvalues from 1 to kappa (integer endpoints)
+        eigs = np.array([1.0, float(kappa)])
+        if N > 2:
+            eigs = np.linspace(1, kappa, N)
+        A = Q @ np.diag(eigs) @ Q.T
+
+        # Choose nc so that integer eigenvalues are exact
+        nc = max(3, int(np.ceil(np.log2(kappa))) + 1)
+
+        info = get_system_info(A, b)
+        eigenvalues = info['eigenvalues']
+        x_classical_norm = info['x_classical_norm']
+
+        t0, C = choose_parameters(eigenvalues, nc)
+
+        qc, sys_q, clk_q, anc_q = build_hhl_circuit(
+            A, b, nc, t0, C, eigenvalues, n_system
+        )
+        x_hhl, p_success = extract_solution_statevector(
+            qc, sys_q, clk_q, anc_q, n_system, nc
+        )
+        fidelity = np.abs(
+            np.dot(np.conj(x_hhl), x_classical_norm)
+        ) ** 2
+        bound = 1.0 / kappa ** 2
+        depth = qc.depth()
+
+        results.append({
+            'kappa': kappa,
+            'n_clock': nc,
+            'fidelity': fidelity,
+            'p_success': p_success,
+            'p_lower_bound': bound,
+            'depth': depth,
+            'eigenvalues': eigs,
+        })
+        print(f"{kappa:<8} {nc:<6} {fidelity:<12.6f} {p_success:<12.6f} "
+              f"{bound:<12.6f} {depth:<8}")
+
+    # Plot
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+
+    ks = [r['kappa'] for r in results]
+    ps = [r['p_success'] for r in results]
+    bounds = [r['p_lower_bound'] for r in results]
+    fids = [r['fidelity'] for r in results]
+
+    # Left plot: success probability (log-log)
+    ax1.loglog(ks, ps, 'bo-', linewidth=2, markersize=8,
+               label='Measured $p_1$')
+    ax1.loglog(ks, bounds, 'r--', linewidth=2, markersize=8,
+               label=r'$1/\kappa^2$ bound')
+    ax1.set_xlabel(r'Condition number $\kappa$', fontsize=12)
+    ax1.set_ylabel('Success probability', fontsize=12)
+    ax1.legend(fontsize=11)
+    ax1.set_title('Success Probability vs $\\kappa$', fontsize=13)
+    ax1.grid(True, which='both', alpha=0.3)
+
+    # Right plot: fidelity
+    ax2.semilogx(ks, fids, 'go-', linewidth=2, markersize=8)
+    ax2.set_xlabel(r'Condition number $\kappa$', fontsize=12)
+    ax2.set_ylabel('Fidelity', fontsize=12)
+    ax2.set_ylim([0, 1.05])
+    ax2.set_title('Fidelity vs $\\kappa$', fontsize=13)
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(f'figures/exp2_{label}.png', dpi=300,
+                bbox_inches='tight')
+    plt.close()
+    print(f"\n  Plot saved: figures/exp2_{label}.png")
+
+    return results
+
+def experiment_3_noise(error_rates=None, shots=200000, label='noise'):
+    """Experiment 3: Effect of gate noise on HHL performance.
+    Uses the 2x2 system (shallowest circuit, perfect noiseless fidelity)
+    with depolarizing noise at varying rates."""
+
+    if error_rates is None:
+        error_rates = [0, 1e-4, 5e-4, 1e-3, 2e-3, 5e-3, 1e-2]
+
+    # 2x2 system: perfect fidelity when noiseless
+    A = np.array([[1.5, 0.5],
+                   [0.5, 1.5]])
+    b = np.array([1.0, 0.0])
+
+    info = get_system_info(A, b)
+    eigenvalues = info['eigenvalues']
+    n_system = info['n_system']
+    x_classical_norm = info['x_classical_norm']
+    nc = 2
+
+    t0, C = choose_parameters(eigenvalues, nc)
+    qc, sys_q, clk_q, anc_q = build_hhl_circuit(
+        A, b, nc, t0, C, eigenvalues, n_system
+    )
+    n_total = n_system + nc + 1
+
+    # Add measurements
+    qc_meas = qc.copy()
+    cr = ClassicalRegister(n_total, 'meas')
+    qc_meas.add_register(cr)
+    for i in range(n_total):
+        qc_meas.measure(i, i)
+
+    # Transpile once to basis gates
+    backend = AerSimulator()
+    qc_transpiled = transpile(qc_meas, backend, optimization_level=0)
+    basis_depth = qc_transpiled.depth()
+    basis_count = qc_transpiled.size()
+
+    print(f"\n{'=' * 80}")
+    print(f"{'EXPERIMENT 3: Noise Modelling':^80}")
+    print(f"{'=' * 80}")
+    print(f"  System: 2x2, kappa = {info['kappa']:.2f}")
+    print(f"  Clock qubits: {nc}")
+    print(f"  Transpiled circuit: depth={basis_depth}, gates={basis_count}")
+    print(f"  Shots per run: {shots}")
+    print(f"\n{'p_err':<10} {'Fidelity':<12} {'p_success':<12} "
+          f"{'Post shots':<14} {'Est. circuit err':<16}")
+    print(f"{'-' * 80}")
+
+    results = []
+    clock_zeros = '0' * nc
+
+    for p_err in error_rates:
+        if p_err == 0:
+            noise_model = None
+        else:
+            noise_model = NoiseModel()
+            error_1q = depolarizing_error(p_err, 1)
+            error_2q = depolarizing_error(10 * p_err, 2)
+            noise_model.add_all_qubit_quantum_error(
+                error_1q, ['sx', 'x', 'rz', 'h', 'ry']
+            )
+            noise_model.add_all_qubit_quantum_error(
+                error_2q, ['cx']
+            )
+
+        if noise_model is not None:
+            noisy_backend = AerSimulator(noise_model=noise_model)
+        else:
+            noisy_backend = AerSimulator()
+
+        qc_t = transpile(qc_meas, noisy_backend, optimization_level=0)
+        job = noisy_backend.run(qc_t, shots=shots)
+        counts = job.result().get_counts()
+
+        # Post-select
+        N = 2 ** n_system
+        post_selected = {}
+        total_post = 0
+
+        for bitstr, count in counts.items():
+            anc_bit = bitstr[0]
+            clk_bits = bitstr[1:1 + nc]
+            sys_bits = bitstr[1 + nc:]
+
+            if anc_bit == '1' and clk_bits == clock_zeros:
+                post_selected[sys_bits] = (
+                    post_selected.get(sys_bits, 0) + count
+                )
+                total_post += count
+
+        p_success = total_post / shots
+
+        probs = np.zeros(N)
+        if total_post > 0:
+            for sys_bits, count in post_selected.items():
+                sys_idx = int(sys_bits[::-1], 2)
+                probs[sys_idx] = count / total_post
+
+        # Reconstruct amplitudes with sign from classical
+        x_shots = np.sqrt(probs)
+        for i in range(N):
+            if x_classical_norm[i] < 0:
+                x_shots[i] = -x_shots[i]
+        norm = np.linalg.norm(x_shots)
+        if norm > 1e-12:
+            x_shots = x_shots / norm
+        fidelity = np.abs(np.dot(x_shots, x_classical_norm)) ** 2
+
+        # Estimate total circuit error
+        est_err = 1.0 - (1.0 - p_err) ** basis_count if p_err > 0 else 0.0
+
+        results.append({
+            'error_rate': p_err,
+            'fidelity': fidelity,
+            'p_success': p_success,
+            'total_post': total_post,
+            'est_circuit_err': est_err,
+        })
+        print(f"{p_err:<10.1e} {fidelity:<12.6f} {p_success:<12.6f} "
+              f"{total_post:<14} {est_err:<16.4f}")
+
+    # Noiseless statevector fidelity for reference
+    x_sv, p_sv = extract_solution_statevector(
+        qc, sys_q, clk_q, anc_q, n_system, nc
+    )
+    fid_sv = np.abs(np.dot(np.conj(x_sv), x_classical_norm)) ** 2
+
+    # Plot
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+
+    ers = [r['error_rate'] for r in results]
+    fids = [r['fidelity'] for r in results]
+    ps = [r['p_success'] for r in results]
+
+    # Use small offset for log scale on the p_err=0 point
+    ers_plot = [max(e, 5e-5) for e in ers]
+
+    ax1.semilogx(ers_plot, fids, 'bo-', linewidth=2, markersize=8,
+                 label='Measured fidelity')
+    ax1.axhline(y=fid_sv, color='r', linestyle='--', linewidth=2,
+                label=f'Noiseless (statevector) = {fid_sv:.3f}')
+    ax1.set_xlabel('Depolarizing error rate $p$', fontsize=12)
+    ax1.set_ylabel('Fidelity', fontsize=12)
+    ax1.set_ylim([0, 1.05])
+    ax1.legend(fontsize=10)
+    ax1.set_title('Fidelity vs Gate Error Rate', fontsize=13)
+    ax1.grid(True, alpha=0.3)
+
+    ax2.semilogx(ers_plot, ps, 'go-', linewidth=2, markersize=8,
+                 label='Measured $p_1$')
+    ax2.axhline(y=p_sv, color='r', linestyle='--', linewidth=2,
+                label=f'Noiseless = {p_sv:.3f}')
+    ax2.set_xlabel('Depolarizing error rate $p$', fontsize=12)
+    ax2.set_ylabel('Post-selection probability', fontsize=12)
+    ax2.legend(fontsize=10)
+    ax2.set_title('Success Probability vs Gate Error Rate', fontsize=13)
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(f'figures/exp3_{label}.png', dpi=300,
+                bbox_inches='tight')
+    plt.close()
+    print(f"\n  Noiseless statevector fidelity: {fid_sv:.6f}")
+    print(f"  Plot saved: figures/exp3_{label}.png")
 
     return results
 
@@ -923,5 +1220,7 @@ if __name__ == "__main__":
     comparison = run_classical_comparison()
     shot_results = run_shot_comparison()
     exp1 = experiment_1_precision()
+    exp2 = experiment_2_kappa()
+    exp3 = experiment_3_noise()
 
 
