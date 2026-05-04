@@ -76,8 +76,10 @@ Figures are saved to the `figures/` directory.
 
 ## Repository Structure
 
-HHL Code.py          # Main implementation
-figures/             # Output figures from experiments
+# Main implementation
+HHL Code.py
+# Output figures from experiments
+figures/             
 
 ## Notes
 
